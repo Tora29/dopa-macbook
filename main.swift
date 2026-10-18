@@ -1,4 +1,4 @@
-// DopaPachinko — 打鍵するたびにMac全体がドパガキになるオーバーレイ
+// dopa-macbook — 打鍵するたびにMac全体がドパガキになるオーバーレイ
 import Cocoa
 import QuartzCore
 import ApplicationServices
@@ -2092,7 +2092,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let screen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main ?? NSScreen.screens[0]
         let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
         let url = FileManager.default.urls(for: .moviesDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("DopaPachinko-\(stamp).mp4")
+            .appendingPathComponent("dopa-macbook-\(stamp).mp4")
         Task { @MainActor in
             defer {
                 self.recording = false

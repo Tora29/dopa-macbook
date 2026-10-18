@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleName</key>
-	<string>DopaPachinko</string>
+	<string>dopa-macbook</string>
 	<key>CFBundleIdentifier</key>
-	<string>local.dopa.pachinko</string>
+	<string>local.dopa.macbook</string>
 	<key>CFBundleExecutable</key>
-	<string>DopaPachinko</string>
+	<string>dopa-macbook</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>

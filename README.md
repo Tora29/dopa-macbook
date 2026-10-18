@@ -1,4 +1,4 @@
-# DopaPachinko
+# dopa-macbook
 
 打鍵するたびに Mac 全体がクラブになる、メニューバー常駐の打鍵エフェクトアプリです。
 どのアプリで文字を打っても、コンボ表示・星の粒・レーザー・ムービングライトが画面に重なり、100 コンボで FEVER TIME（4つ打ちの曲つき）に突入します。
@@ -43,11 +43,11 @@
 # 初回だけ：署名用の自己署名証明書をログインキーチェーンに作る（任意・おすすめ）
 ./setup-signing.sh
 
-# ビルド（build/DopaPachinko.app ができる）
+# ビルド（build/dopa-macbook.app ができる）
 ./build.sh
 
 # 起動
-open build/DopaPachinko.app
+open build/dopa-macbook.app
 ```
 
 `setup-signing.sh` で作った証明書（「DopaPachinko Dev」）で署名すると、ビルドし直しても下の許可が外れません。
@@ -56,7 +56,7 @@ open build/DopaPachinko.app
 
 ## 必要な許可
 
-システム設定 →「プライバシーとセキュリティ」で DopaPachinko をオンにします。
+システム設定 →「プライバシーとセキュリティ」で dopa-macbook をオンにします。
 
 | 許可 | 用途 |
 |---|---|
@@ -81,7 +81,7 @@ open build/DopaPachinko.app
 コマンドからも録画できます（設定がオフでも、このときだけ演出と音をオンにして録り、終わると終了します）。
 
 ```sh
-open build/DopaPachinko.app --args --record-demo
+open build/dopa-macbook.app --args --record-demo
 ```
 
 ## 調整

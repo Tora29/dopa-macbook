@@ -1,5 +1,5 @@
 #!/bin/zsh
-# DopaPachinko 専用の自己署名コード署名証明書をログインキーチェーンに作る（1回だけ実行）
+# dopa-macbook 専用の自己署名コード署名証明書をログインキーチェーンに作る（1回だけ実行）
 # 削除したいときは「キーチェーンアクセス」で「DopaPachinko Dev」を消す
 set -euo pipefail
 
