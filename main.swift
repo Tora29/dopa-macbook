@@ -8,7 +8,7 @@ import ScreenCaptureKit
 // MARK: - 調整用パラメータ
 
 enum Tune {
-    static let comboTimeout = 2.0  // これ以上手が止まるとCOMBO BREAK
+    static let comboTimeout = 2.5  // これ以上手が止まるとCOMBO BREAK
     static let feverDuration = 20.0 // FEVER TIMEの長さ（秒）
 }
 
@@ -39,14 +39,25 @@ struct TextStyle {
     var glow: NSColor? = nil
     var glowRadius: CGFloat = 20
     var horizontal = false       // グラデーションを左→右にする（既定は上→下）
+    var font: String? = nil      // 書体名。nil なら丸ゴシック
+    var skew: CGFloat = 0        // 斜体の傾き（0.2 で約11度右に倒す）
+}
+
+/// FEVER TIME用のイカした書体。日本語はヒラギノ角ゴの極太で受ける
+let partyFont = "Futura-CondensedExtraBold"
+
+func namedFont(_ name: String, _ size: CGFloat) -> NSFont {
+    let base = NSFont(name: name, size: size) ?? roundedFont(size)
+    let jp = NSFontDescriptor(name: "HiraginoSans-W9", size: size)
+    return NSFont(descriptor: base.fontDescriptor.addingAttributes([.cascadeList: [jp]]), size: size) ?? base
 }
 
 /// 縁取り・グロー・グラデーション付きの文字をビットマップに描く
 func renderText(_ text: String, _ st: TextStyle, scale: CGFloat) -> (CGImage, CGSize) {
-    let font = roundedFont(st.size)
+    let font = st.font.map { namedFont($0, st.size) } ?? roundedFont(st.size)
     let pad = (st.glow != nil ? st.glowRadius * 1.6 : 4) + st.size * st.strokeRatio / 200 + 4
     let ts = NSAttributedString(string: text, attributes: [.font: font]).size()
-    let size = CGSize(width: ceil(ts.width + pad * 2), height: ceil(ts.height + pad * 2))
+    let size = CGSize(width: ceil(ts.width + abs(st.skew) * (ts.height + pad * 2) + pad * 2), height: ceil(ts.height + pad * 2))
     let pw = Int(size.width * scale), ph = Int(size.height * scale)
     let rgbSpace = CGColorSpaceCreateDeviceRGB()
     let ctx = CGContext(data: nil, width: pw, height: ph, bitsPerComponent: 8, bytesPerRow: 0,
@@ -54,10 +65,14 @@ func renderText(_ text: String, _ st: TextStyle, scale: CGFloat) -> (CGImage, CG
     ctx.scaleBy(x: scale, y: scale)
 
     func draw(_ attrs: [NSAttributedString.Key: Any], in c: CGContext) {
+        c.saveGState()
+        // 下端を軸に上ほど右へずらして斜体にする
+        c.concatenate(CGAffineTransform(a: 1, b: 0, c: st.skew, d: 1, tx: 0, ty: 0))
         NSGraphicsContext.saveGraphicsState()
         NSGraphicsContext.current = NSGraphicsContext(cgContext: c, flipped: false)
         NSAttributedString(string: text, attributes: attrs).draw(at: NSPoint(x: pad, y: pad))
         NSGraphicsContext.restoreGraphicsState()
+        c.restoreGState()
     }
 
     // 縁取り（とグロー）を先に描き、その上に本体を重ねる
@@ -165,10 +180,12 @@ final class OverlayWindow: NSWindow {
     let root = CALayer()
     let screenRef: NSScreen
     var comboLabel: CALayer?
-    var rankFrame: CAShapeLayer?
+    var rankFrame: CALayer?   // 縁の光（太線＋細線の2本の枠）
+    var laserTier = 0
     var lasers: [CALayer] = []
     var spots: [CALayer] = []
     var feverLayers: [CALayer] = []
+    var heads: [CALayer] = []  // 上から照らすムービングライト
 
     init(screen: NSScreen) {
         screenRef = screen
@@ -330,14 +347,15 @@ final class Sound {
         }
     }
 
-    /// 140BPM・4小節ループの4つ打ち（Am - F - C - G）
+    /// 140BPM・4小節ループの4つ打ち（Am - F - C - G）。キックとベースを前に出した重いミックス
     private func renderMusic() -> AVAudioPCMBuffer {
         let sr = format.sampleRate
         let beat = 60 / Sound.bpm
         let bars = 4
         let n = Int(Double(bars * 4) * beat * sr)
         var kick = [Double](repeating: 0, count: n)
-        var rest = [Double](repeating: 0, count: n)
+        var bass = [Double](repeating: 0, count: n)  // キックに合わせて深く沈める
+        var top = [Double](repeating: 0, count: n)   // ハット・クラップ・コード。軽く沈める
         // ループの継ぎ目で途切れないよう、はみ出した分は先頭に回す
         func add(_ buf: inout [Double], at t: Double, dur: Double, _ f: (Double) -> Double) {
             let s0 = Int(t * sr)
@@ -348,31 +366,43 @@ final class Sound {
 
         for b in 0..<(bars * 4) {
             let t0 = Double(b) * beat
+            // キック：深く伸びるサブの胴鳴り＋「ドッ」のアタック＋歪み
             var kp = 0.0
-            add(&kick, at: t0, dur: 0.38) { t in
-                kp += (45 + 110 * exp(-t * 28)) / sr
-                let body = sin(2 * .pi * kp) * exp(-t * 7)
-                return tanh(3 * (body + (t < 0.004 ? 0.5 : 0))) * 0.9
+            add(&kick, at: t0, dur: beat * 0.97) { t in
+                kp += (50 + 130 * exp(-t * 30)) / sr
+                let body = sin(2 * .pi * kp) * exp(-t * 4.5)
+                let punch = sin(2 * .pi * 160 * t) * exp(-t * 35) * 0.5
+                let click = t < 0.004 ? Double.random(in: -1...1) * 0.6 : 0
+                return tanh(2.8 * (body + punch + click))
             }
             if b % 2 == 1 {
-                add(&rest, at: t0, dur: 0.18) { t in Double.random(in: -1...1) * exp(-t * 22) * 0.3 }
+                add(&top, at: t0, dur: 0.18) { t in Double.random(in: -1...1) * exp(-t * 22) * 0.3 }
             }
             for (k, vol, len) in [(2, 0.2, 0.07), (1, 0.07, 0.03), (3, 0.07, 0.03)] {
                 var prev = 0.0
-                add(&rest, at: t0 + beat * Double(k) / 4, dur: len) { t in
+                add(&top, at: t0 + beat * Double(k) / 4, dur: len) { t in
                     let x = Double.random(in: -1...1)
                     defer { prev = x }
                     return (x - prev) * exp(-t * 45) * vol
                 }
             }
-            let root = roots[b / 4] * 2
+            // サブベース：拍いっぱい鳴らし続け、サイドチェインで「ズン、ズン」とうねらせる
+            let root = roots[b / 4]
+            var sp = 0.0
+            add(&bass, at: t0, dur: beat) { t in
+                sp += root / sr
+                return sin(2 * .pi * sp) * min(1, t / 0.005) * min(1, (beat - t) / 0.005) * 0.6
+            }
+            // 裏のローリングベース（太く・歪ませて）
             for k in 1...3 {
-                var ph = 0.0, y = 0.0
-                add(&rest, at: t0 + beat * Double(k) / 4, dur: beat / 4 * 0.95) { t in
-                    ph += root / sr
-                    let frac = ph - floor(ph)
-                    y += 0.12 * ((2 * frac - 1) + 0.5 * (frac < 0.5 ? 1 : -1) - y)
-                    return tanh(2.5 * y) * exp(-t * 8) * 0.38
+                var ph = (0.0, 0.0), y = 0.0
+                add(&bass, at: t0 + beat * Double(k) / 4, dur: beat / 4 * 0.95) { t in
+                    ph.0 += root * 2 * 0.995 / sr
+                    ph.1 += root * 2 * 1.005 / sr
+                    let f0 = ph.0 - floor(ph.0), f1 = ph.1 - floor(ph.1)
+                    let raw = (2 * f0 - 1) + (2 * f1 - 1) + 0.6 * (f0 < 0.5 ? 1 : -1)
+                    y += 0.18 * (raw - y)
+                    return tanh(3 * y) * exp(-t * 7) * 0.42
                 }
             }
         }
@@ -380,7 +410,7 @@ final class Sound {
             let chord = chords[bar]
             for pos in [2, 6, 10, 14, 15] {
                 var phs = [Double](repeating: 0, count: chord.count * 3)
-                add(&rest, at: Double(bar * 16 + pos) * beat / 4, dur: 0.22) { t in
+                add(&top, at: Double(bar * 16 + pos) * beat / 4, dur: 0.22) { t in
                     var s = 0.0
                     for (ci, f) in chord.enumerated() {
                         for (d, det) in [0.993, 1.0, 1.007].enumerated() {
@@ -389,19 +419,24 @@ final class Sound {
                             s += 2 * (phs[k] - floor(phs[k])) - 1
                         }
                     }
-                    return s / Double(phs.count) * exp(-t * 9) * 0.5
+                    return s / Double(phs.count) * exp(-t * 9) * 0.3
                 }
             }
         }
 
+        // ミックス：ベースは深く、上ものは軽く沈めるサイドチェイン → 歪ませて音圧を詰める
+        var mix = [Double](repeating: 0, count: n)
+        for i in 0..<n {
+            let tb = (Double(i) / sr).truncatingRemainder(dividingBy: beat)
+            let bassDuck = 0.08 + 0.92 * (1 - exp(-tb / 0.06))
+            let topDuck = 0.3 + 0.7 * (1 - exp(-tb / 0.07))
+            mix[i] = tanh(1.6 * (kick[i] + bass[i] * bassDuck + top[i] * topDuck))
+        }
+        let peak = max(mix.map(abs).max() ?? 1, 1e-6)
         let buf = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(n))!
         buf.frameLength = AVAudioFrameCount(n)
         let out = buf.floatChannelData![0]
-        for i in 0..<n {
-            let tb = (Double(i) / sr).truncatingRemainder(dividingBy: beat)
-            let duck = 1 - 0.65 * exp(-tb / 0.07)  // キックに合わせて他の音を沈めるサイドチェイン
-            out[i] = Float(tanh(1.2 * (kick[i] + rest[i] * duck)) * 0.8)
-        }
+        for i in 0..<n { out[i] = Float(mix[i] / peak * 0.95) }
         return buf
     }
 }
@@ -463,6 +498,15 @@ final class Dopa: NSObject {
         if !on { sound.hush() }
     }
 
+    /// 録画モード用。保存されている設定は書き換えずに、このときだけ演出と音をオンにする
+    func enableTemporarily() {
+        sound.enabled = true
+        guard !enabled else { return }
+        enabled = true
+        windows.forEach { $0.orderFrontRegardless() }
+        onComboChange?()
+    }
+
     /// 許可なしでも見た目を確認できるよう、連打を再現する
     func demo(keys: Int) {
         guard enabled else { return }
@@ -514,7 +558,7 @@ final class Dopa: NSObject {
             let lp = w.toLocal(p)
             let c = CGFloat(min(combo, 60))
             starBurst(at: lp, in: w, count: 14 + Int(c), speed: 150 + c * 4)
-            flare(at: lp, in: w, color: rankColor(combo), size: 180 + c * 3)
+            flare(at: lp, in: w, color: rankColor(combo), size: 260 + c * 5)
             if combo % 5 == 0 { ring(at: lp, in: w, color: rankColor(combo), radius: 40, maxScale: 2.4, life: 0.5) }
             showCombo(at: lp, in: w)
         }
@@ -523,10 +567,14 @@ final class Dopa: NSObject {
         updateClub()
         if clubLevel >= 4 && !inFever { recolorLasers() }
         windows.forEach { $0.lasers.forEach(pulse) }
+        if !inFever { pulseFrame() }
         onComboChange?()
     }
 
     private func windowAt(_ p: CGPoint) -> OverlayWindow? { windows.first { $0.frame.contains(p) } }
+
+    /// レーザーや花火などの重い演出は、この画面だけに出す
+    private var stageWindow: OverlayWindow? { windowAt(lastPoint) ?? windowAt(NSEvent.mouseLocation) ?? windows.first }
 
     private func randomPoint() -> CGPoint {
         let f = (windowAt(NSEvent.mouseLocation) ?? windows.first)?.frame ?? .zero
@@ -673,7 +721,8 @@ final class Dopa: NSObject {
         updateClub()
     }
 
-    /// 画面の縁の枠。ランクで色が変わり、S以上は虹色に回る
+    /// 画面の縁の枠。ランクで色が変わり、S以上とFEVER中は虹色に回る
+    /// （全画面の影のぼかしは重いので、太さの違う枠を2本重ねて光って見せる）
     private func updateRankFrame() {
         let key: String? = !enabled ? nil : inFever ? "FEVER" : combo >= 10 ? rankName(combo) : nil
         guard key != frameKey else { return }
@@ -682,25 +731,24 @@ final class Dopa: NSObject {
             w.rankFrame?.removeFromSuperlayer()
             w.rankFrame = nil
             guard let key else { continue }
-            let f = CAShapeLayer()
+            let f = CALayer()
             f.frame = w.root.bounds
-            f.path = ringPath(w.root.bounds, 12)
-            f.shadowPath = f.path
-            f.shadowRadius = 24
-            f.shadowOpacity = 1
-            f.shadowOffset = .zero
             f.zPosition = 90
             let col = rankColor(combo)
-            f.fillColor = col.cgColor
-            f.shadowColor = col.cgColor
-            if key.hasPrefix("S") || key == "FEVER" {
-                for (k, path) in [("c", "fillColor"), ("s", "shadowColor")] {
-                    let a = CAKeyframeAnimation(keyPath: path)
-                    a.values = (rainbowFill + [rainbowFill[0]]).map { $0.cgColor }
+            for (width, alpha) in [(CGFloat(28), CGFloat(0.3)), (CGFloat(10), CGFloat(1))] {
+                let b = CALayer()
+                b.frame = f.bounds
+                b.borderWidth = width
+                b.borderColor = col.withAlphaComponent(alpha).cgColor
+                b.setValue(width, forKey: "baseWidth")
+                if key.hasPrefix("S") || key == "FEVER" {
+                    let a = CAKeyframeAnimation(keyPath: "borderColor")
+                    a.values = (rainbowFill + [rainbowFill[0]]).map { $0.withAlphaComponent(alpha).cgColor }
                     a.duration = key == "FEVER" ? 0.5 : key == "S" ? 2 : 1
                     a.repeatCount = .infinity
-                    f.add(a, forKey: k)
+                    b.add(a, forKey: "rainbow")
                 }
+                f.addSublayer(b)
             }
             let fade = CABasicAnimation(keyPath: "opacity")
             fade.fromValue = 0
@@ -731,18 +779,23 @@ final class Dopa: NSObject {
         if n >= 100 { startFever() }
         let banner = fever ? "FEVER TIME!!" : title
         sound.play(fever ? "boom" : "milestone")
-        for w in windows {
+        for w in [stageWindow].compactMap({ $0 }) {
             let b = w.root.bounds
             let life = fever ? 3.0 : 1.4
             dim(in: w, alpha: 0.35, life: life)
             flashLasers(in: w)
             flare(at: w.center, in: w, color: .white, size: 700)
-            let (img, sz) = renderText(banner, TextStyle(size: min(b.width * 0.1, 170),
+            let (img, sz) = renderText(banner, TextStyle(size: min(b.width * (fever ? 0.13 : 0.1), fever ? 220 : 170),
                                                         fill: [rgb(1, 0.25, 0.3), rgb(1, 0.75, 0.1), rgb(0.95, 1, 0.2), rgb(0.3, 1, 0.45)],
                                                         stroke: rgb(0.15, 0.02, 0.1), strokeRatio: 8,
-                                                        glow: rgb(1, 0.3, 0.6), glowRadius: 34, horizontal: true),
+                                                        glow: rgb(1, 0.3, 0.6), glowRadius: 34, horizontal: true,
+                                                        font: partyFont, skew: 0.2),
                                        scale: w.scale)
-            showImage(img, sz, in: w, at: CGPoint(x: b.midX, y: b.midY - b.height * 0.08), anim: .pop, life: life, shake: true)
+            if fever {
+                slam(img, sz, in: w, at: CGPoint(x: b.midX, y: b.midY - b.height * 0.05), angle: 0.14, life: life)
+            } else {
+                showImage(img, sz, in: w, at: CGPoint(x: b.midX, y: b.midY - b.height * 0.08), anim: .pop, life: life, shake: true)
+            }
             ring(at: w.center, in: w, color: .white, radius: 120, maxScale: 4, life: 0.8, width: 10)
             starBurst(at: w.center, in: w, count: 160, speed: 620, scale: 0.5, life: 1.3, gravity: -200)
             if n >= 30 {
@@ -834,39 +887,49 @@ final class Dopa: NSObject {
 
     // MARK: クラブ演出
 
-    /// 10〜: ムービングライト / 20〜: 下からレーザー / 30〜: 上の両角からも / 50〜とFEVER: 色が切り替わる
+    /// 10〜: ムービングライトと反射光 / 20〜: 下からレーザー / 30〜: 上の両角からも＋スポットライト / 50〜とFEVER: 色が切り替わる
     private func updateClub() {
         let lvl = !enabled ? 0 : inFever || combo >= 50 ? 4 : combo >= 30 ? 3 : combo >= 20 ? 2 : combo >= 10 ? 1 : 0
         guard lvl != clubLevel else { return }
-        let old = clubLevel
         clubLevel = lvl
-        for w in windows {
-            if lvl == 0 {
-                w.spots.forEach(fadeRemove)
-                w.spots = []
-            } else if w.spots.isEmpty {
-                w.spots = (0..<3).map { makeSpot(in: w, color: Dopa.neon[($0 * 2) % Dopa.neon.count]) }
-            }
-            // レーザーの本数が変わる段階でだけ組み直す
-            guard min(lvl, 3) != min(old, 3) else { continue }
-            w.lasers.forEach(fadeRemove)
-            w.lasers = []
-            let b = w.root.bounds
-            let len = hypot(b.width, b.height) * 1.1
-            let col = Dopa.neon[neonIndex % Dopa.neon.count]
-            if lvl >= 2 {
-                w.lasers.append(makeRig(in: w, at: CGPoint(x: b.midX, y: -10), angle: .pi / 2, count: 7, spread: 1.5,
-                                        length: len, colors: [col], sweep: 0.35, period: 2.0))
-            }
-            if lvl >= 3 {
-                let c2 = Dopa.neon[(neonIndex + 1) % Dopa.neon.count]
-                w.lasers.append(makeRig(in: w, at: CGPoint(x: -10, y: b.maxY + 10), angle: -.pi / 4, count: 5, spread: 0.9,
-                                        length: len, colors: [c2], sweep: 0.3, period: 1.6))
-                w.lasers.append(makeRig(in: w, at: CGPoint(x: b.maxX + 10, y: b.maxY + 10), angle: -3 * .pi / 4, count: 5, spread: 0.9,
-                                        length: len, colors: [c2], sweep: 0.3, period: 1.8))
-            }
-        }
+        let stage = stageWindow
+        for w in windows { applyClub(w === stage ? lvl : 0, to: w) }
         if lvl >= 4 { recolorLasers() }
+    }
+
+    private func applyClub(_ lvl: Int, to w: OverlayWindow) {
+        if lvl == 0 {
+            w.spots.forEach(fadeRemove)
+            w.spots = []
+        } else if w.spots.isEmpty {
+            w.spots = (0..<3).map { makeSpot(in: w, color: Dopa.neon[($0 * 2) % Dopa.neon.count]) } + [reflections(in: w)]
+        }
+        if lvl >= 3, w.heads.isEmpty {
+            w.heads = makeHeads(in: w)
+        } else if lvl < 3 {
+            w.heads.forEach(fadeRemove)
+            w.heads = []
+        }
+        // レーザーの本数が変わる段階でだけ組み直す
+        let tier = lvl >= 2 ? min(lvl, 3) : 0
+        guard tier != w.laserTier else { return }
+        w.laserTier = tier
+        w.lasers.forEach(fadeRemove)
+        w.lasers = []
+        let b = w.root.bounds
+        let len = hypot(b.width, b.height) * 1.1
+        let col = Dopa.neon[neonIndex % Dopa.neon.count]
+        if tier >= 2 {
+            w.lasers.append(makeRig(in: w, at: CGPoint(x: b.midX, y: -10), angle: .pi / 2, count: 7, spread: 1.5,
+                                    length: len, colors: [col], sweep: 0.35, period: 2.0))
+        }
+        if tier >= 3 {
+            let c2 = Dopa.neon[(neonIndex + 1) % Dopa.neon.count]
+            w.lasers.append(makeRig(in: w, at: CGPoint(x: -10, y: b.maxY + 10), angle: -.pi / 4, count: 5, spread: 0.9,
+                                    length: len, colors: [c2], sweep: 0.3, period: 1.6))
+            w.lasers.append(makeRig(in: w, at: CGPoint(x: b.maxX + 10, y: b.maxY + 10), angle: -3 * .pi / 4, count: 5, spread: 0.9,
+                                    length: len, colors: [c2], sweep: 0.3, period: 1.8))
+        }
     }
 
     private func makeRig(in w: OverlayWindow, at p: CGPoint, angle: Double, count: Int, spread: Double, length: CGFloat,
@@ -881,14 +944,11 @@ final class Dopa: NSObject {
             beam.endPoint = CGPoint(x: 0.5, y: 1)
             beam.locations = [0, 0.3, 0.5, 0.7, 1]
             beam.anchorPoint = CGPoint(x: 0, y: 0.5)
-            beam.bounds = CGRect(x: 0, y: 0, width: length, height: 10)
+            beam.bounds = CGRect(x: 0, y: 0, width: length, height: 14)
             beam.position = .zero
             let t = count == 1 ? 0 : Double(i) / Double(count - 1) - 0.5
             beam.transform = CATransform3DMakeRotation(angle + t * spread, 0, 0, 1)
-            beam.shadowRadius = 10
-            beam.shadowOpacity = 0.9
-            beam.shadowOffset = .zero
-            beam.shadowPath = CGPath(rect: beam.bounds, transform: nil)
+            beam.setValue(t, forKey: "fanT")
             paint(beam, colors[i % colors.count])
             rig.addSublayer(beam)
         }
@@ -911,7 +971,6 @@ final class Dopa: NSObject {
 
     private func paint(_ beam: CAGradientLayer, _ c: NSColor) {
         beam.colors = [NSColor.clear, c.withAlphaComponent(0.8), NSColor.white, c.withAlphaComponent(0.8), NSColor.clear].map { $0.cgColor }
-        beam.shadowColor = c.cgColor
     }
 
     /// 打鍵・ビートに合わせてレーザーを一瞬明るくする
@@ -1033,6 +1092,160 @@ final class Dopa: NSObject {
         after(0.4) { l.removeFromSuperlayer() }
     }
 
+    /// ミラーボールの反射光。画面上の中央を軸に、光の粒がぐるぐる回る
+    private func reflections(in w: OverlayWindow) -> CALayer {
+        let b = w.root.bounds
+        let R = hypot(b.width, b.height)
+        let c = CALayer()
+        c.position = CGPoint(x: b.midX, y: b.maxY + 40)
+        c.zPosition = 6
+        let tints = [NSColor.white, NSColor.white] + Dopa.neon
+        for _ in 0..<90 {
+            let d = CALayer()
+            let sz = CGFloat.random(in: 4...11)
+            let r = R * sqrt(CGFloat.random(in: 0.02...1))
+            let a = Double.random(in: 0..<(2 * .pi))
+            d.bounds = CGRect(x: 0, y: 0, width: sz, height: sz)
+            d.cornerRadius = sz / 2
+            d.position = CGPoint(x: r * cos(a), y: r * sin(a))
+            d.backgroundColor = tints.randomElement()!.withAlphaComponent(0.9).cgColor
+            d.opacity = Float.random(in: 0.35...0.9)
+            let tw = CABasicAnimation(keyPath: "opacity")
+            tw.fromValue = d.opacity
+            tw.toValue = 0.05
+            tw.duration = Double.random(in: 0.4...1.4)
+            tw.autoreverses = true
+            tw.repeatCount = .infinity
+            tw.timeOffset = Double.random(in: 0...2)
+            d.add(tw, forKey: "twinkle")
+            c.addSublayer(d)
+        }
+        let rot = CABasicAnimation(keyPath: "transform.rotation.z")
+        rot.fromValue = 0
+        rot.toValue = 2 * Double.pi
+        rot.duration = 16
+        rot.repeatCount = .infinity
+        c.add(rot, forKey: "rot")
+        let fadeIn = CABasicAnimation(keyPath: "opacity")
+        fadeIn.fromValue = 0
+        fadeIn.duration = 0.8
+        c.add(fadeIn, forKey: "in")
+        w.root.addSublayer(c)
+        return c
+    }
+
+    /// 画面の上の縁から照らす円錐のスポットライト。2拍で1往復し、隣同士は逆向きに振って交差させる
+    private func makeHeads(in w: OverlayWindow) -> [CALayer] {
+        let b = w.root.bounds
+        let n = 5
+        let beat = 60 / Sound.bpm
+        let L = b.height * 1.35
+        let baseW = 2 * L * tan(0.13)
+        return (0..<n).map { i in
+            let head = CALayer()
+            head.position = CGPoint(x: b.width * (0.1 + 0.8 * CGFloat(i) / CGFloat(n - 1)), y: b.maxY + 4)
+            head.zPosition = 14
+            head.opacity = 0.55
+            let cone = CALayer()
+            cone.anchorPoint = CGPoint(x: 0.5, y: 1)
+            cone.bounds = CGRect(x: 0, y: 0, width: baseW, height: L)
+            cone.position = .zero
+            head.addSublayer(cone)
+            let lens = CALayer()
+            lens.contents = glowImage(.white)
+            lens.bounds = CGRect(x: 0, y: 0, width: 70, height: 70)
+            lens.position = .zero
+            head.addSublayer(lens)
+            paintHead(head, Dopa.neon[(neonIndex + i) % Dopa.neon.count])
+            let amp = 0.55
+            let a = CABasicAnimation(keyPath: "transform.rotation.z")
+            a.fromValue = i % 2 == 0 ? -amp : amp
+            a.toValue = i % 2 == 0 ? amp : -amp
+            a.duration = beat * 2
+            a.autoreverses = true
+            a.repeatCount = .infinity
+            a.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            head.add(a, forKey: "swing")
+            let fadeIn = CABasicAnimation(keyPath: "opacity")
+            fadeIn.fromValue = 0
+            fadeIn.duration = 0.4
+            head.add(fadeIn, forKey: "in")
+            w.root.addSublayer(head)
+            return head
+        }
+    }
+
+    private var coneCache: [String: CGImage] = [:]
+
+    /// 頂点が上の円錐。色ごとに一度だけ描いて使い回す
+    private func coneImage(_ c: NSColor) -> CGImage {
+        let key = c.description
+        if let img = coneCache[key] { return img }
+        let img = bitmap(128, 512) { ctx in
+            let path = CGMutablePath()
+            path.move(to: CGPoint(x: 64, y: 512))
+            path.addLine(to: CGPoint(x: 0, y: 0))
+            path.addLine(to: CGPoint(x: 128, y: 0))
+            path.closeSubpath()
+            ctx.addPath(path)
+            ctx.clip()
+            let colors = [c.withAlphaComponent(0.8), c.withAlphaComponent(0.28), c.withAlphaComponent(0)].map { $0.cgColor } as CFArray
+            let grad = CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(), colors: colors, locations: [0, 0.4, 1])!
+            ctx.drawLinearGradient(grad, start: CGPoint(x: 64, y: 512), end: CGPoint(x: 64, y: 0), options: [])
+        }
+        coneCache[key] = img
+        return img
+    }
+
+    private func paintHead(_ head: CALayer, _ c: NSColor) {
+        head.sublayers?.first?.contents = coneImage(c)
+    }
+
+    /// キックのたびに画面全体を色付きの光で一瞬照らす（1拍に1回まで）
+    private func wash(in w: OverlayWindow, color: NSColor) {
+        let l = CALayer()
+        l.frame = w.root.bounds
+        l.backgroundColor = color.cgColor
+        l.opacity = 0
+        l.zPosition = 8
+        let a = CABasicAnimation(keyPath: "opacity")
+        a.fromValue = 0.2
+        a.toValue = 0
+        a.duration = 0.3
+        a.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        w.root.addSublayer(l)
+        l.add(a, forKey: nil)
+        after(0.3) { l.removeFromSuperlayer() }
+    }
+
+    /// レーザーの扇を拍に合わせて一瞬大きく開いて戻す
+    private func fanOpen(_ rig: CALayer, beat: Double) {
+        for beam in rig.sublayers ?? [] {
+            let t = beam.value(forKey: "fanT") as? Double ?? 0
+            let a = CAKeyframeAnimation(keyPath: "transform.rotation.z")
+            a.values = [0, t * 0.6, 0]
+            a.keyTimes = [0, 0.25, 1]
+            a.isAdditive = true
+            a.duration = beat * 0.9
+            a.timingFunctions = [.init(name: .easeOut), .init(name: .easeInEaseOut)]
+            beam.add(a, forKey: "fan")
+        }
+    }
+
+    /// 画面の縁の光を、キック（FEVER外では打鍵）に合わせて太くする
+    private func pulseFrame() {
+        for w in windows {
+            for b in w.rankFrame?.sublayers ?? [] {
+                let base = b.value(forKey: "baseWidth") as? CGFloat ?? 10
+                let a = CAKeyframeAnimation(keyPath: "borderWidth")
+                a.values = [base * 2.6, base]
+                a.duration = 0.25
+                a.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                b.add(a, forKey: "kick")
+            }
+        }
+    }
+
     // MARK: FEVER TIME
 
     private func startFever() {
@@ -1044,12 +1257,12 @@ final class Dopa: NSObject {
         let t = Timer(timeInterval: 60 / Sound.bpm, target: self, selector: #selector(feverBeat), userInfo: nil, repeats: true)
         RunLoop.main.add(t, forMode: .common)
         beatTimer = t
+        let stage = stageWindow
         for w in windows {
             let b = w.root.bounds
-            w.feverLayers = [sunburst(in: w, life: nil),
-                             confettiRain(in: w, continuous: true),
-                             marquee(in: w, y: b.maxY - 120, life: nil, reverse: false),
+            w.feverLayers = [marquee(in: w, y: b.maxY - 120, life: nil, reverse: false),
                              marquee(in: w, y: 70, life: nil, reverse: true)]
+            if w === stage { w.feverLayers += [sunburst(in: w, life: nil), confettiRain(in: w, continuous: true)] }
         }
         updateClub()
         updateRankFrame()
@@ -1060,25 +1273,35 @@ final class Dopa: NSObject {
         if CACurrentMediaTime() >= until { stopFever(); return }
         beatCount += 1
         recolorLasers()
-        for w in windows {
-            w.lasers.forEach(pulse)
-            let b = w.root.bounds
-            let p = CGPoint(x: CGFloat.random(in: b.width * 0.1...b.width * 0.9), y: CGFloat.random(in: b.height * 0.2...b.height * 0.8))
-            let col = Dopa.neon[beatCount % Dopa.neon.count]
-            flare(at: p, in: w, color: col, size: 420)
-            if beatCount % 2 == 0 { rocket(in: w, delay: 0, quiet: true) }
-            if beatCount % 4 == 0 {
-                ring(at: w.center, in: w, color: col, radius: 120, maxScale: 4, life: 0.8, width: 10)
-                let q = CGPoint(x: CGFloat.random(in: b.width * 0.15...b.width * 0.85), y: CGFloat.random(in: b.height * 0.25...b.height * 0.75))
-                starBurst(at: q, in: w, count: 120, speed: 500, scale: 0.45, life: 1.1, gravity: -200)
-            }
-            if beatCount % 8 == 0 {
-                flashLasers(in: w)
-                feverShout(in: w)
-            }
-            if beatCount % 8 == 4 { emojiFlight(["🔥", "💥", "⚡️", "🎉", "🪩"], in: w, count: 12) }
-            if beatCount % 16 == 0 { whiteFlash(in: w) }
+        pulseFrame()
+        let beat = 60 / Sound.bpm
+        let col = Dopa.neon[beatCount % Dopa.neon.count]
+        windows.forEach { wash(in: $0, color: col) }
+        guard let w = stageWindow else { return }
+        w.lasers.forEach(pulse)
+        w.lasers.forEach { fanOpen($0, beat: beat) }
+        if beatCount % 4 == 1 {
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            for (i, h) in w.heads.enumerated() { paintHead(h, Dopa.neon[(beatCount / 4 + i) % Dopa.neon.count]) }
+            CATransaction.commit()
         }
+        w.heads.forEach(pulse)
+        let b = w.root.bounds
+        let p = CGPoint(x: CGFloat.random(in: b.width * 0.1...b.width * 0.9), y: CGFloat.random(in: b.height * 0.2...b.height * 0.8))
+        flare(at: p, in: w, color: col, size: 420)
+        if beatCount % 2 == 0 { rocket(in: w, delay: 0, quiet: true) }
+        if beatCount % 4 == 0 {
+            ring(at: w.center, in: w, color: col, radius: 120, maxScale: 4, life: 0.8, width: 10)
+            let q = CGPoint(x: CGFloat.random(in: b.width * 0.15...b.width * 0.85), y: CGFloat.random(in: b.height * 0.25...b.height * 0.75))
+            starBurst(at: q, in: w, count: 70, speed: 500, scale: 0.45, life: 1.1, gravity: -200)
+        }
+        if beatCount % 8 == 0 {
+            flashLasers(in: w)
+            feverShout(in: w)
+        }
+        if beatCount % 8 == 4 { emojiFlight(["🔥", "💥", "⚡️", "🎉", "🪩"], in: w, count: 12) }
+        if beatCount % 16 == 0 { whiteFlash(in: w) }
     }
 
     private func stopFever() {
@@ -1095,19 +1318,170 @@ final class Dopa: NSObject {
         updateRankFrame()
     }
 
-    private static let shouts = ["FEVER!!", "DOPAMINE!!", "脳汁ドバドバ!!", "止まるな!!", "UNSTOPPABLE!!", "最強!!", "まだいける!!"]
+    private static let shouts = [
+        "FEVER!!", "DOPAMINE!!", "脳汁ドバドバ!!", "止まるな!!", "UNSTOPPABLE!!", "最強!!", "まだいける!!",
+        "神!!", "優勝!!", "天才!!", "ぶち上げ!!", "限界突破!!", "覚醒!!", "無敵!!", "えぐい!!", "やばすぎ!!",
+        "指が止まらねぇ!!", "ドーパミン全開!!", "LET'S GO!!", "HYPE!!", "PARTY!!", "MAX!!", "BOOM!!BOOM!!BOOM!!", "INCREDIBLE!!",
+    ]
+    private var shoutBag: [String] = []
+    private var lastShout: String?
+
+    /// 全部を1回ずつ出し切るまで同じ言葉は出さない。混ぜ直したときも直前と同じ言葉は続けない
+    private func nextShout() -> String {
+        if shoutBag.isEmpty {
+            shoutBag = Dopa.shouts.shuffled()
+            if shoutBag.last == lastShout { shoutBag.swapAt(0, shoutBag.count - 1) }
+        }
+        let word = shoutBag.removeLast()
+        lastShout = word
+        return word
+    }
 
     private func feverShout(in w: OverlayWindow) {
-        let word = Dopa.shouts[(beatCount / 8) % Dopa.shouts.count]
+        let word = nextShout()
         let key = "shout:\(word)@\(w.scale)"
-        let (img, sz) = textCache[key] ?? renderText(word, TextStyle(size: 120, fill: rainbowFill, stroke: rgb(0.1, 0, 0.15),
-                                                                     strokeRatio: 9, glow: rgb(1, 0.2, 0.8), glowRadius: 30,
-                                                                     horizontal: true), scale: w.scale)
+        let (img, sz) = textCache[key] ?? renderText(word, TextStyle(size: 150, fill: [rgb(1, 1, 1), rgb(1, 0.95, 0.4), rgb(1, 0.55, 0.1)],
+                                                                     stroke: rgb(0.1, 0, 0.15), strokeRatio: 9,
+                                                                     glow: rgb(1, 0.2, 0.8), glowRadius: 30,
+                                                                     font: partyFont, skew: 0.22), scale: w.scale)
         textCache[key] = (img, sz)
         let b = w.root.bounds
-        let x = CGFloat.random(in: min(b.midX, sz.width / 2)...max(b.midX, b.maxX - sz.width / 2))
-        let y = CGFloat.random(in: b.height * 0.3...b.height * 0.7)
-        showImage(img, sz, in: w, at: CGPoint(x: x, y: y), anim: .pop, life: 1.6, shake: true)
+        // 右上がりと右下がりを交互に
+        let up = (beatCount / 8) % 2 == 0
+        let angle = (up ? 1 : -1) * CGFloat.random(in: 0.12...0.22)
+        let x = CGFloat.random(in: min(b.midX, sz.width / 2 + 40)...max(b.midX, b.maxX - sz.width / 2 - 40))
+        let y = CGFloat.random(in: b.height * 0.32...b.height * 0.62)
+        slam(img, sz, in: w, at: CGPoint(x: x, y: y), angle: angle, life: 1.7)
+    }
+
+    /// 文字を大きい所から斜めに叩きつけ、着地点から衝撃波を出す。最後は傾いた向きのまま流れて消える
+    private func slam(_ img: CGImage, _ size: CGSize, in w: OverlayWindow, at p: CGPoint, angle: CGFloat, life: Double) {
+        let impact = 0.07  // life に対する着地のタイミング
+        let holder = CALayer()
+        holder.position = p
+        holder.transform = CATransform3DMakeRotation(angle, 0, 0, 1)
+        holder.zPosition = 50
+        let l = CALayer()
+        l.contents = img
+        l.contentsScale = w.scale
+        l.bounds = CGRect(origin: .zero, size: size)
+        l.position = .zero
+        // 4倍から一気に落とし、着地で縦につぶれてから跳ね返る
+        let sx = CAKeyframeAnimation(keyPath: "transform.scale.x")
+        sx.values = [4, 1.18, 0.94, 1.03, 1, 1, 1.12]
+        sx.keyTimes = [0, impact, impact + 0.04, impact + 0.09, impact + 0.14, 0.85, 1].map { NSNumber(value: $0) }
+        let sy = CAKeyframeAnimation(keyPath: "transform.scale.y")
+        sy.values = [4, 0.72, 1.1, 0.97, 1, 1, 1.12]
+        sy.keyTimes = sx.keyTimes
+        let ease = [CAMediaTimingFunction(name: .easeIn)] + Array(repeating: CAMediaTimingFunction(name: .easeOut), count: 5)
+        sx.timingFunctions = ease
+        sy.timingFunctions = ease
+        let x = CAKeyframeAnimation(keyPath: "position.x")
+        x.values = [-220, 0, 20, 260]
+        x.keyTimes = [0, impact, 0.85, 1].map { NSNumber(value: $0) }
+        x.timingFunctions = [.init(name: .easeIn), .init(name: .linear), .init(name: .easeIn)]
+        let o = CAKeyframeAnimation(keyPath: "opacity")
+        o.values = [0, 1, 1, 0]
+        o.keyTimes = [0, impact * 0.6, 0.85, 1].map { NSNumber(value: $0) }
+        let g = CAAnimationGroup()
+        g.animations = [sx, sy, x, o]
+        g.duration = life
+        g.fillMode = .forwards
+        g.isRemovedOnCompletion = false
+        l.add(g, forKey: "slam")
+        // 着地の衝撃で大きく揺らし、だんだん収める
+        let shake = CAKeyframeAnimation(keyPath: "position")
+        shake.values = (0..<10).map { i in
+            let k = Double(9 - i) / 9 * 26
+            return NSValue(point: NSPoint(x: Double.random(in: -k...k), y: Double.random(in: -k...k)))
+        }
+        shake.isAdditive = true
+        shake.duration = 0.4
+        shake.beginTime = CACurrentMediaTime() + life * impact
+        holder.add(shake, forKey: "shake")
+        holder.addSublayer(l)
+        w.root.addSublayer(holder)
+
+        let g0 = gen
+        after(life * impact) { [weak self] in
+            guard let self, self.gen == g0 else { return }
+            self.sound.play("boom")
+            self.shockwave(at: p, in: w)
+            self.starBurst(at: p, in: w, count: 90, speed: 700, scale: 0.45, life: 1.0, gravity: -200)
+        }
+        after(life) { holder.removeFromSuperlayer() }
+    }
+
+    /// 着地点から広がる衝撃波：強い光・集中線・空気の圧の輪・3重のリング
+    private func shockwave(at p: CGPoint, in w: OverlayWindow) {
+        let b = w.root.bounds
+        let reach = hypot(b.width, b.height)
+        flare(at: p, in: w, color: .white, size: 800)
+
+        // 漫画の集中線のような放射状の線
+        let lines = CAShapeLayer()
+        let R = reach * 0.6
+        lines.bounds = CGRect(x: -R, y: -R, width: R * 2, height: R * 2)
+        lines.position = p
+        lines.zPosition = 47
+        let path = CGMutablePath()
+        for _ in 0..<64 {
+            let a = Double.random(in: 0..<(2 * .pi))
+            let wdt = Double.random(in: 0.006...0.018)
+            let inner = R * CGFloat.random(in: 0.18...0.32)
+            path.move(to: CGPoint(x: inner * cos(a), y: inner * sin(a)))
+            path.addLine(to: CGPoint(x: R * cos(a - wdt), y: R * sin(a - wdt)))
+            path.addLine(to: CGPoint(x: R * cos(a + wdt), y: R * sin(a + wdt)))
+            path.closeSubpath()
+        }
+        lines.path = path
+        lines.fillColor = NSColor(white: 1, alpha: 0.8).cgColor
+        lines.opacity = 0
+        let ls = CABasicAnimation(keyPath: "transform.scale")
+        ls.fromValue = 0.5
+        ls.toValue = 1.25
+        let lo = CABasicAnimation(keyPath: "opacity")
+        lo.fromValue = 1
+        lo.toValue = 0
+        let lg = CAAnimationGroup()
+        lg.animations = [ls, lo]
+        lg.duration = 0.35
+        lg.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        w.root.addSublayer(lines)
+        lines.add(lg, forKey: nil)
+        after(0.35) { lines.removeFromSuperlayer() }
+
+        // 空気の圧が画面いっぱいに広がる光の輪
+        let wave = CAGradientLayer()
+        wave.type = .radial
+        let d: CGFloat = 400
+        wave.bounds = CGRect(x: 0, y: 0, width: d, height: d)
+        wave.position = p
+        wave.startPoint = CGPoint(x: 0.5, y: 0.5)
+        wave.endPoint = CGPoint(x: 1, y: 1)
+        wave.colors = [rgb(1, 1, 1, 0), rgb(1, 1, 1, 0), rgb(1, 1, 1, 0.55), rgb(1, 1, 1, 0)].map { $0.cgColor }
+        wave.locations = [0, 0.72, 0.86, 1]
+        wave.zPosition = 46
+        wave.opacity = 0
+        let ws = CABasicAnimation(keyPath: "transform.scale")
+        ws.fromValue = 0.2
+        ws.toValue = reach * 1.4 / d
+        let wo = CABasicAnimation(keyPath: "opacity")
+        wo.fromValue = 1
+        wo.toValue = 0
+        let wg = CAAnimationGroup()
+        wg.animations = [ws, wo]
+        wg.duration = 0.65
+        wg.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        w.root.addSublayer(wave)
+        wave.add(wg, forKey: nil)
+        after(0.65) { wave.removeFromSuperlayer() }
+
+        // 太い白いリング＋色付きのリングを時間差で3重に
+        let col = Dopa.neon[beatCount % Dopa.neon.count]
+        ring(at: p, in: w, color: .white, radius: 70, maxScale: 9, life: 0.6, width: 16)
+        after(0.07) { self.ring(at: p, in: w, color: col, radius: 70, maxScale: 7, life: 0.6, width: 10) }
+        after(0.14) { self.ring(at: p, in: w, color: .white, radius: 70, maxScale: 5, life: 0.55, width: 5) }
     }
 
     // MARK: 演出パーツ
@@ -1236,10 +1610,6 @@ final class Dopa: NSObject {
         s.fillColor = nil
         s.strokeColor = color.cgColor
         s.lineWidth = width
-        s.shadowColor = color.cgColor
-        s.shadowRadius = 12
-        s.shadowOpacity = 1
-        s.shadowOffset = .zero
         s.zPosition = 45
         s.opacity = 0
         let sc = CABasicAnimation(keyPath: "transform.scale")
@@ -1305,7 +1675,7 @@ final class Dopa: NSObject {
     private func firework(at p: CGPoint, in w: OverlayWindow, color: NSColor) {
         let main = CAEmitterCell()
         main.contents = sparkImage
-        main.birthRate = 220 / 0.05
+        main.birthRate = 140 / 0.05
         main.lifetime = 1.4
         main.lifetimeRange = 0.4
         main.velocity = 380
@@ -1471,7 +1841,7 @@ final class Dopa: NSObject {
             c.color = color.cgColor
             return c
         }
-        let k: Float = continuous ? 0.35 : 1
+        let k: Float = continuous ? 0.25 : 1
         e.emitterCells = [cell(goldCoin, rate: 60 * k, scale: 0.55, gravity: -700)]
             + rainbowFill.map { cell(confettiImg, rate: 25 * k, scale: 1.2, color: $0, gravity: -220) }
         e.beginTime = CACurrentMediaTime()
@@ -1649,7 +2019,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // 録画モードで起動したときは、許可ダイアログが映り込まないよう確認だけにする
         let recordOnLaunch = CommandLine.arguments.contains("--record-demo")
         let opts = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: !recordOnLaunch] as CFDictionary
-        if recordOnLaunch { after(1) { self.recordDemo(quitAfter: true) } }
+        if recordOnLaunch {
+            dopa.enableTemporarily()
+            after(1.5) { self.recordDemo(quitAfter: true) }
+        }
         if AXIsProcessTrustedWithOptions(opts) {
             installMonitor()
         } else {
