@@ -576,8 +576,22 @@ final class Dopa: NSObject {
     /// レーザーや花火などの重い演出は、この画面だけに出す
     private var stageWindow: OverlayWindow? { windowAt(lastPoint) ?? windowAt(NSEvent.mouseLocation) ?? windows.first }
 
+    /// 録画中だけ使う、演出を寄せる範囲（グローバル座標）。録画範囲の外で演出が起きないようにする
+    var focusRect: CGRect?
+
+    /// 画面 w の中で演出を置く範囲（ローカル座標）
+    private func stage(_ w: OverlayWindow) -> CGRect {
+        guard let f = focusRect, w.frame.intersects(f) else { return w.root.bounds }
+        return f.intersection(w.frame).offsetBy(dx: -w.frame.minX, dy: -w.frame.minY)
+    }
+
+    /// 範囲 b の中の、割合 x・y で指定した帯からランダムな点
+    private func spot(in b: CGRect, x: ClosedRange<CGFloat>, y: ClosedRange<CGFloat>) -> CGPoint {
+        CGPoint(x: b.minX + b.width * CGFloat.random(in: x), y: b.minY + b.height * CGFloat.random(in: y))
+    }
+
     private func randomPoint() -> CGPoint {
-        let f = (windowAt(NSEvent.mouseLocation) ?? windows.first)?.frame ?? .zero
+        let f = focusRect ?? (windowAt(NSEvent.mouseLocation) ?? windows.first)?.frame ?? .zero
         let r = f.insetBy(dx: f.width * 0.15, dy: f.height * 0.15)
         return CGPoint(x: CGFloat.random(in: r.minX...r.maxX), y: CGFloat.random(in: r.minY...r.maxY))
     }
@@ -780,11 +794,12 @@ final class Dopa: NSObject {
         let banner = fever ? "FEVER TIME!!" : title
         sound.play(fever ? "boom" : "milestone")
         for w in [stageWindow].compactMap({ $0 }) {
-            let b = w.root.bounds
+            let b = stage(w)
+            let c = CGPoint(x: b.midX, y: b.midY)
             let life = fever ? 3.0 : 1.4
             dim(in: w, alpha: 0.35, life: life)
             flashLasers(in: w)
-            flare(at: w.center, in: w, color: .white, size: 700)
+            flare(at: c, in: w, color: .white, size: 700)
             let (img, sz) = renderText(banner, TextStyle(size: min(b.width * (fever ? 0.13 : 0.1), fever ? 220 : 170),
                                                         fill: [rgb(1, 0.25, 0.3), rgb(1, 0.75, 0.1), rgb(0.95, 1, 0.2), rgb(0.3, 1, 0.45)],
                                                         stroke: rgb(0.15, 0.02, 0.1), strokeRatio: 8,
@@ -796,8 +811,8 @@ final class Dopa: NSObject {
             } else {
                 showImage(img, sz, in: w, at: CGPoint(x: b.midX, y: b.midY - b.height * 0.08), anim: .pop, life: life, shake: true)
             }
-            ring(at: w.center, in: w, color: .white, radius: 120, maxScale: 4, life: 0.8, width: 10)
-            starBurst(at: w.center, in: w, count: 160, speed: 620, scale: 0.5, life: 1.3, gravity: -200)
+            ring(at: c, in: w, color: .white, radius: 120, maxScale: 4, life: 0.8, width: 10)
+            starBurst(at: c, in: w, count: 160, speed: 620, scale: 0.5, life: 1.3, gravity: -200)
             if n >= 30 {
                 for i in 0..<(fever ? 16 : 8) { rocket(in: w, delay: 0.15 + Double(i) * 0.18 + Double.random(in: 0...0.12)) }
             }
@@ -806,7 +821,7 @@ final class Dopa: NSObject {
                 sunburst(in: w, life: 4)
                 confettiRain(in: w)
                 for i in 0..<3 {
-                    after(Double(i) * 0.22) { self.ring(at: w.center, in: w, color: i == 1 ? gold : .white, radius: 120, maxScale: 5, life: 0.9, width: 14) }
+                    after(Double(i) * 0.22) { self.ring(at: c, in: w, color: i == 1 ? gold : .white, radius: 120, maxScale: 5, life: 0.9, width: 14) }
                 }
             }
         }
@@ -1287,13 +1302,13 @@ final class Dopa: NSObject {
             CATransaction.commit()
         }
         w.heads.forEach(pulse)
-        let b = w.root.bounds
-        let p = CGPoint(x: CGFloat.random(in: b.width * 0.1...b.width * 0.9), y: CGFloat.random(in: b.height * 0.2...b.height * 0.8))
+        let b = stage(w)
+        let p = spot(in: b, x: 0.1...0.9, y: 0.2...0.8)
         flare(at: p, in: w, color: col, size: 420)
         if beatCount % 2 == 0 { rocket(in: w, delay: 0, quiet: true) }
         if beatCount % 4 == 0 {
-            ring(at: w.center, in: w, color: col, radius: 120, maxScale: 4, life: 0.8, width: 10)
-            let q = CGPoint(x: CGFloat.random(in: b.width * 0.15...b.width * 0.85), y: CGFloat.random(in: b.height * 0.25...b.height * 0.75))
+            ring(at: CGPoint(x: b.midX, y: b.midY), in: w, color: col, radius: 120, maxScale: 4, life: 0.8, width: 10)
+            let q = spot(in: b, x: 0.15...0.85, y: 0.25...0.75)
             starBurst(at: q, in: w, count: 70, speed: 500, scale: 0.45, life: 1.1, gravity: -200)
         }
         if beatCount % 8 == 0 {
@@ -1319,9 +1334,9 @@ final class Dopa: NSObject {
     }
 
     private static let shouts = [
-        "FEVER!!", "DOPAMINE!!", "脳汁ドバドバ!!", "止まるな!!", "UNSTOPPABLE!!", "最強!!", "まだいける!!",
-        "神!!", "優勝!!", "天才!!", "ぶち上げ!!", "限界突破!!", "覚醒!!", "無敵!!", "えぐい!!", "やばすぎ!!",
-        "指が止まらねぇ!!", "ドーパミン全開!!", "LET'S GO!!", "HYPE!!", "PARTY!!", "MAX!!", "BOOM!!BOOM!!BOOM!!", "INCREDIBLE!!",
+        "FEVER!!", "DOPAMINE!!", "UNSTOPPABLE!!", "GO!!GO!!GO!!", "HYPE!!", "PARTY PEOPLE!!",
+        "BOOM!!BOOM!!BOOM!!", "INCREDIBLE!!", "Fooooooooo!!",
+        "MAKE SOME NOISE!!", "BOUNCE!!", "YEAAAAH!!", "OVERDRIVE!!", "NO LIMIT!!",
     ]
     private var shoutBag: [String] = []
     private var lastShout: String?
@@ -1345,12 +1360,12 @@ final class Dopa: NSObject {
                                                                      glow: rgb(1, 0.2, 0.8), glowRadius: 30,
                                                                      font: partyFont, skew: 0.22), scale: w.scale)
         textCache[key] = (img, sz)
-        let b = w.root.bounds
+        let b = stage(w)
         // 右上がりと右下がりを交互に
         let up = (beatCount / 8) % 2 == 0
         let angle = (up ? 1 : -1) * CGFloat.random(in: 0.12...0.22)
-        let x = CGFloat.random(in: min(b.midX, sz.width / 2 + 40)...max(b.midX, b.maxX - sz.width / 2 - 40))
-        let y = CGFloat.random(in: b.height * 0.32...b.height * 0.62)
+        let x = CGFloat.random(in: min(b.midX, b.minX + sz.width / 2 + 40)...max(b.midX, b.maxX - sz.width / 2 - 40))
+        let y = b.minY + b.height * CGFloat.random(in: 0.32...0.62)
         slam(img, sz, in: w, at: CGPoint(x: x, y: y), angle: angle, life: 1.7)
     }
 
@@ -1629,8 +1644,9 @@ final class Dopa: NSObject {
 
     private func rocket(in w: OverlayWindow, delay: Double, quiet: Bool = false) {
         let b = w.root.bounds
-        let from = CGPoint(x: CGFloat.random(in: b.width * 0.08...b.width * 0.92), y: -10)
-        let to = CGPoint(x: from.x + CGFloat.random(in: -140...140), y: CGFloat.random(in: b.height * 0.45...b.height * 0.88))
+        let st = stage(w)
+        let from = CGPoint(x: st.minX + st.width * CGFloat.random(in: 0.08...0.92), y: -10)
+        let to = CGPoint(x: from.x + CGFloat.random(in: -140...140), y: st.minY + st.height * CGFloat.random(in: 0.45...0.88))
         let col = NSColor(hue: CGFloat.random(in: 0..<1), saturation: 0.85, brightness: 1, alpha: 1)
         let g = gen
         after(delay) { [weak self] in
@@ -1962,16 +1978,26 @@ final class Dopa: NSObject {
 final class Recorder: NSObject, SCRecordingOutputDelegate {
     private var stream: SCStream?
 
-    /// screen を音声付きで url に録画し始める
-    func start(screen: NSScreen, url: URL) async throws {
+    /// screen の中央を16:9で切り出し、1920x1080・音声付きで url に録画し始める。切り出した範囲をグローバル座標で返す
+    func start(screen: NSScreen, url: URL) async throws -> CGRect {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         let id = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
         guard let display = content.displays.first(where: { $0.displayID == id }) ?? content.displays.first else {
             throw NSError(domain: "DopaRecorder", code: 1, userInfo: [NSLocalizedDescriptionKey: "ディスプレイが見つかりません"])
         }
+        let W = CGFloat(display.width), H = CGFloat(display.height)
+        let crop: CGRect
+        if W / H > 16.0 / 9 {
+            let cw = (H * 16 / 9).rounded()
+            crop = CGRect(x: ((W - cw) / 2).rounded(), y: 0, width: cw, height: H)
+        } else {
+            let ch = (W * 9 / 16).rounded()
+            crop = CGRect(x: 0, y: ((H - ch) / 2).rounded(), width: W, height: ch)
+        }
         let cfg = SCStreamConfiguration()
-        cfg.width = Int(CGFloat(display.width) * screen.backingScaleFactor)
-        cfg.height = Int(CGFloat(display.height) * screen.backingScaleFactor)
+        cfg.sourceRect = crop
+        cfg.width = 1920
+        cfg.height = 1080
         cfg.minimumFrameInterval = CMTime(value: 1, timescale: 60)
         cfg.showsCursor = true
         cfg.capturesAudio = true
@@ -1986,6 +2012,8 @@ final class Recorder: NSObject, SCRecordingOutputDelegate {
         try s.addRecordingOutput(SCRecordingOutput(configuration: oc, delegate: self))
         try await s.startCapture()
         stream = s
+        // 切り出しは中央なので上下対称。Cocoa座標（左下原点）に直して返す
+        return CGRect(x: screen.frame.minX + crop.minX, y: screen.frame.minY + (H - crop.maxY), width: crop.width, height: crop.height)
     }
 
     func stop() async {
@@ -2096,10 +2124,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Task { @MainActor in
             defer {
                 self.recording = false
+                self.dopa.focusRect = nil
                 if quitAfter { NSApp.terminate(nil) }
             }
             do {
-                try await self.recorder.start(screen: screen, url: url)
+                self.dopa.focusRect = try await self.recorder.start(screen: screen, url: url)
             } catch {
                 NSLog("DopaRecorder start failed: \(error)")
                 return
